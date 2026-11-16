@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: WarRoom Probe
+## Notes: Development checks for WarRoom: /wrprobe. Not for release.
+## Author: WarRoom
+## Version: 0.1.0-dev
+## X-License: GPL-3.0-or-later
+## SavedVariables: WarRoomProbeDB
+## LoadSavedVariablesFirst: 1
+## OptionalDeps: TomTom, GatherMate2, RXPGuides, Questie, RareScanner
+
+Probe.lua

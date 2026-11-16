@@ -1,0 +1,29 @@
+[project]
+name = "warroom-tools"
+version = "0.1.0"
+description = "Offline data tools for the WarRoom WoW Forever addon"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "lupa"]
+# Reading game images (BLP) for the map art tools; scipy for OpenMap's renderer (mapart).
+art = ["pillow", "numpy", "scipy"]
+
+[project.scripts]
+warroom = "warroom_tools.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "tools" }
+packages = ["warroom_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# LuaJIT signals errors on Windows with SEH exceptions (code 0xe24c4a0x) that it catches itself; pytest's
+# faulthandler reports them as "Windows fatal exception" anyway.
+addopts = "-p no:faulthandler"

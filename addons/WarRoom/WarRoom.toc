@@ -1,0 +1,27 @@
+## Interface: 16001
+## Title: WarRoom
+## Notes: Maps, minimap, routes, dungeons and more.
+## Author: WarRoom
+## Version: 0.1.0-dev
+## X-License: GPL-3.0-or-later
+## SavedVariables: WarRoomDB
+## LoadSavedVariablesFirst: 1
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\AceDB-3.0\AceDB-3.0.xml
+
+Core\Init.lua
+Core\Coords.lua
+Core\Combat.lua
+Core\Jobs.lua
+Core\Data.lua
+Core\Pins.lua
+Data\Tiles.lua
+Data\MapArt.lua
+Core\Canvas.lua
+Core\DB.lua
+Core\Position.lua
+Core\Slash.lua
+
+Dev\CanvasTest.lua
