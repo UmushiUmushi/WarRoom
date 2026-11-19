@@ -19,6 +19,9 @@ Core\Data.lua
 Core\Pins.lua
 Data\Tiles.lua
 Data\MapArt.lua
+Data\Labels.lua
+Data\Zones.lua
+Core\Zones.lua
 Core\Canvas.lua
 Core\DB.lua
 Core\Position.lua

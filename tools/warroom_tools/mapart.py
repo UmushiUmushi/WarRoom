@@ -104,9 +104,11 @@ CITY_CUTS = {
     ],
 }
 CITY_SOFT = 30  # art px over which a city's cut fades out past its outline
-# Cities whose ground the tiles leave as blank paper (OpenMap's CITY_FADE_OF: their own maps come in early, under
-# their zones' banners): the Canvas brings them in with the zones.
-EARLY_CITIES = (1454, 1456)  # Orgrimmar, Thunder Bluff
+# Cities whose ground the tiles leave as blank paper (OpenMap cuts their zones' overlay pieces of them out, banner and
+# all, for its cities' own maps): their "banner" is that whole piece instead (the city drawn as its zone's map draws
+# it, with its big banner), so they show as the other cities do: their zone's drawing of them on the detailed map,
+# giving way to their own maps closer in. {city: the area of its zone's overlay piece}
+CITY_PIECES = {1454: 1637, 1456: 1638}  # Orgrimmar, Thunder Bluff
 CITY_FRAME = (12, 40)  # art px in from its map's edge where a cut is gone / whole (the card's burnt edge)
 
 
@@ -475,6 +477,31 @@ def blp_write(path, rgba):
     Path(path).write_bytes(head + struct.pack("<16I", *offsets) + struct.pack("<16I", *sizes) + bytes(1024) + b"".join(levels))
 
 
+def city_piece(build_id, zone, area, refresh=False):
+    """(image, (zone, x, y, w, h)) of the overlay piece of a zone's map for an area (WorldMapOverlay), padded to powers
+    of two with clear pixels: w x h art px at x, y on the zone's map (1002 x 668). None without one."""
+    import io
+
+    from PIL import Image
+
+    arts = {int(r["UiMapID"]): int(r["UiMapArtID"]) for r in wago.read_db2("UiMapXMapArt", build_id, refresh)}
+    row = next((r for r in wago.read_db2("WorldMapOverlay", build_id, refresh)
+                if int(r["UiMapArtID"]) == arts.get(zone) and int(r["AreaID_0"]) == area), None)
+    if not row:
+        return None
+    tiles = [t for t in wago.read_db2("WorldMapOverlayTile", build_id, refresh) if t["WorldMapOverlayID"] == row["ID"]]
+    w, h = int(row["TextureWidth"]), int(row["TextureHeight"])
+    pw, ph = (1 << (w - 1).bit_length()), (1 << (h - 1).bit_length())
+    img = Image.new("RGBA", (max(pw, 256), max(ph, 256)), (0, 0, 0, 0))
+    for t in tiles:
+        tile = Image.open(io.BytesIO(wago.casc_file(int(t["FileDataID"])))).convert("RGBA")
+        img.paste(tile, (int(t["ColIndex"]) * 256, int(t["RowIndex"]) * 256))
+    img = img.crop((0, 0, pw, ph))
+    clear = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    clear.paste(img.crop((0, 0, w, h)), (0, 0))
+    return clear, (zone, int(row["OffsetX"]), int(row["OffsetY"]), pw, ph)
+
+
 def city_cut(outlines, size=256):
     """size x size RGBA (white, the cut in alpha) over a city map's art: each outline filled, grown and blurred, whole
     inside and fading out over CITY_SOFT past it, and gone by CITY_FRAME from the art's edge."""
@@ -629,8 +656,14 @@ def build(build_id, refresh=False, data_file=DATA_FILE, bake_dir=BAKE_DIR, progr
     for city, v in list(cities.items()) + list(underground.items()):
         if v["cut"] and city in cities:
             copies[f"cut_{city}.tga"] = tex / "MapCityMask" / f"{city}.tga"
-        if v["banner"]:
+        if v["banner"] and city not in CITY_PIECES:
             copies[f"banner_{city}.tga"] = tex / "MapBanner" / f"{city}.tga"
+    for city, area in CITY_PIECES.items():
+        piece = city in cities and city_piece(build_id, cities[city]["zone"], area, refresh)
+        if piece:
+            img, cities[city]["banner"] = piece
+            img.save(bake_dir / f"banner_{city}.tga")
+            files.add(f"banner_{city}.tga")
     for name, src in copies.items():
         shutil.copyfile(src, bake_dir / name)
         files.add(name)
@@ -666,8 +699,8 @@ def build(build_id, refresh=False, data_file=DATA_FILE, bake_dir=BAKE_DIR, progr
         "-- sea = { color, hatchAlpha, reach }: under the tiles, drawn live (Media/Bake/sea_*, hatch, coast_*)",
         "-- cities[uiMapID] = { zone = uiMapID, cut = true (Media/Bake/cut_<city> cuts its map down to the city; else",
         "--   Media/Bake/round), banner = { zone, x, y, w, h }: Media/Bake/banner_<city>, w x h art px at x, y on its",
-        "--   zone's map, title = true when the city's map has its own banner, early = true for a city whose map comes",
-        "--   in with the zones (under its banner: the tiles leave its ground blank) }",
+        "--   zone's map, title = true when the city's map has its own banner (Orgrimmar's and Thunder Bluff's",
+        "--   \"banners\" are their zones' whole drawings of them, which the tiles leave out) }",
         "-- underground[uiMapID]: cities under their zone's surface, only their banners drawn.",
         "local _, ns = ...",
         "ns.MapArt = {",
@@ -705,8 +738,6 @@ def build(build_id, refresh=False, data_file=DATA_FILE, bake_dir=BAKE_DIR, progr
                 parts.append("banner = { " + ", ".join(str(x) for x in v["banner"]) + " }")
             if v["title"]:
                 parts.append("title = true")
-            if city in EARLY_CITIES and table == "cities":
-                parts.append("early = true")
             lines.append(f"\t\t[{city}] = {{ {', '.join(parts)} }}, -- {names.get(city, '?')}")
         lines.append("\t},")
 

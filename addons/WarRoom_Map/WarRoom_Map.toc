@@ -1,0 +1,13 @@
+## Interface: 16001
+## Title: WarRoom World Map
+## Notes: WarRoom's map inside the game's world map window.
+## Author: WarRoom
+## Version: 0.1.0-dev
+## X-License: GPL-3.0-or-later
+## Dependencies: WarRoom
+
+Map.lua
+Marks.lua
+Labels.lua
+Transitions.lua
+Settings.lua

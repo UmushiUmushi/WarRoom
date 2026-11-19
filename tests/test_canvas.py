@@ -99,3 +99,96 @@ def test_painted_layers_through_every_zoom():
     assert [r.level for r in drawn] == ["far", "far", "near", "near", "fine"]
     assert all(0 < r.tiles < 60 for r in drawn)
     assert loaded < 120  # only tiles near the view hold their files
+
+
+def test_world_map_draws_both_continents_as_on_azeroths_map():
+    env = _env()
+    run = env.lua.execute("""return function(ns)
+        local Canvas = ns.Canvas
+        -- a point carried from Kalimdor's yards into the Eastern Kingdoms' and back lands where it started
+        local ex, ey = Canvas.Convert(1, 0, -1150, -5)
+        local kx, ky = Canvas.Convert(0, 1, ex, ey)
+        local canvas = Canvas.New(CreateFrame("Frame"), { world = true })
+        -- Azeroth's whole map, seen from Kalimdor: both continents' paintings, Kalimdor's sea under them
+        local world = Canvas.WorldRect(1)
+        canvas:SetView(1, (world.top + world.bottom) / 2, (world.left + world.right) / 2, 50)
+        local far = { continent = canvas.continent, k = canvas.groups[1] and canvas.groups[1].root.shown,
+            e = canvas.groups[0] and canvas.groups[0].root.shown, sea = canvas.groups[1].sea.shown,
+            worldArt = #canvas.groups[1].worldArt, land = canvas.groups[1].art.shown }
+        -- panned over Stormwind: the view's continent is now the Eastern Kingdoms, still drawn with Kalimdor
+        local sx, sy = Canvas.Convert(0, 1, -8900, 550)
+        canvas:SetView(1, sx, sy, 20)
+        local near = { continent = canvas.continent, x = canvas.cx, y = canvas.cy, sea0 = canvas.groups[0].sea.shown,
+            sea1 = canvas.groups[1].sea.shown }
+        local dx, dy = canvas:WorldToFrame(-8900, 550, 0)
+        local fx, fy = canvas:WorldToFrame(sx, sy, 1)
+        -- far out Azeroth's sheet alone; zoomed in, each continent's own painting over it
+        far.sheet = textures[canvas.groups[1].worldArt[1][1]]
+        near.land = canvas.groups[0].art.shown and canvas.groups[0].art.alpha == 1
+            and textures[canvas.groups[0].artPlaced[1][1]]
+        return ex, ey, kx, ky, far, near, dx, dy, fx, fy
+    end""")
+    ex, ey, kx, ky, far, near, dx, dy, fx, fy = run(env.ns)
+    assert abs(kx + 1150) < 1e-6 and abs(ky + 5) < 1e-6
+    assert (ex, ey) != (-1150, -5)
+    assert far.k and far.e and far.sea and far.worldArt > 0
+    assert near.continent == 0 and abs(near.x + 8900) < 1e-6 and abs(near.y - 550) < 1e-6
+    assert near.sea0 and not near.sea1  # (one sea for the view: its continent's)
+    assert abs(dx) < 1e-6 and abs(dy) < 1e-6 and abs(fx) < 1e-6 and abs(fy) < 1e-6
+    assert far.sheet.endswith("Map\\world") and not far.land
+    assert near.land.endswith("Map\\land_1415")
+
+
+def test_an_island_the_game_puts_on_azeroths_map_is_drawn_with_it():
+    env = _env()
+    run = env.lua.execute("""return function(ns)
+        local Canvas, Coords = ns.Canvas, ns.Coords
+        -- Zephras Isle: a map of its own (2991), its zone's parent Azeroth's map, which the game places it on
+        ns.TileData = { [2991] = { files = {} } }
+        C_Map.GetMapInfo = function(id) return { mapID = id, parentMapID = id == 2521 and 947 or 0 } end
+        C_Map.GetMapRectOnMap = function(id, on)
+            if id == 2521 and on == 947 then return 0.42, 0.544, 0.05, 0.174 end
+        end
+        local out = { island = Canvas.IsIsland(2991), listed = Canvas.WorldContinents()[3] == 2991 }
+        local r = Coords.GetMapRect(2521)
+        local mx, my = (r.top + r.bottom) / 2, (r.left + r.right) / 2
+        -- its middle carried onto Azeroth's map: about the middle of its place there
+        local ex, ey = Canvas.Convert(2991, 0, mx, my)
+        local u, v = Coords.WorldToRect(Canvas.WorldRect(0), ex, ey)
+        out.u, out.v = u, v
+        -- a view centred on it is in a continent's yards (an island has no sea of its own), with the island drawn
+        local canvas = Canvas.New(CreateFrame("Frame"), { world = true })
+        canvas:SetView(2991, mx, my, 20)
+        out.continent = canvas.continent
+        local g = canvas.groups[2991]
+        out.drawn = g and g.root.shown and g.art.shown and textures[g.artPlaced[1][1]]
+        out.at = canvas:FrameToContinent(0, 0)
+        return out
+    end""")
+    out = run(env.ns)
+    assert out.island and out.listed
+    assert abs(out.u - 0.482) < 0.002 and abs(out.v - 0.112) < 0.002
+    assert out.continent in (0, 1)
+    assert out.drawn.endswith("Map\\isle_2521")
+    assert out.at == 2991
+
+
+def test_an_island_the_game_wont_place_is_put_where_ours_says():
+    env = _env()
+    run = env.lua.execute("""return function(ns)
+        local Canvas, Coords = ns.Canvas, ns.Coords
+        -- as in the game: Zephras Isle's zone is Azeroth's map's, but C_Map.GetMapRectOnMap has no answer for it
+        ns.TileData = { [2991] = { files = {} } }
+        C_Map.GetMapInfo = function(id) return { mapID = id, parentMapID = id == 2521 and 947 or 0 } end
+        C_Map.GetMapRectOnMap = function() return nil end
+        local r = Coords.GetMapRect(2521)
+        local ex, ey = Canvas.Convert(2991, 0, (r.top + r.bottom) / 2, (r.left + r.right) / 2)
+        local u, v = Coords.WorldToRect(Canvas.WorldRect(0), ex, ey)
+        -- at the continents' scale: its map as wide on Azeroth's as its yards make it
+        local w = Canvas.WorldRect(2991)
+        return Canvas.IsIsland(2991), u, v, r.width / w.width
+    end""")
+    island, u, v, share = run(env.ns)
+    assert island
+    assert abs(u - 0.482) < 0.002 and abs(v - 0.13) < 0.002
+    assert abs(share - 5562.5 / (1002 * 44.6)) < 0.002

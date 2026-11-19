@@ -2,7 +2,7 @@
 
 import argparse
 
-from . import client, link, mapart, tiles, wago
+from . import client, link, mapart, tiles, wago, worldart, zones
 
 
 def cmd_client_info(args):
@@ -29,6 +29,20 @@ def cmd_tiles(args):
         print(f"{map_id:5} {name:28} {count:5} tiles, {edges:4} on the edge, {dropped:4} left out (open ocean, islands of no zone, placeholders)")
     print(f"{len(keys)} fade masks -> {tiles.MASK_DIR}")
     print(f"tile table -> {tiles.DATA_FILE}")
+
+
+def cmd_zones(args):
+    build = args.build or client.forever_build(client.find_install(args.wow))
+    for map_id, (name, count, runs, points) in zones.build(build, refresh=args.refresh).items():
+        print(f"{map_id:5} {name:28} {count:3} maps, {runs:5} runs, {points:6} outline points")
+    print(f"zone table -> {zones.DATA_FILE}")
+
+
+def cmd_worldart(args):
+    build = args.build or client.forever_build(client.find_install(args.wow))
+    for name, what in worldart.build(build, refresh=args.refresh):
+        print(f"{name:22} {what}")
+    print(f"sheets -> {worldart.OUT_DIR}")
 
 
 def cmd_mapart(args):
@@ -64,6 +78,16 @@ def main(argv=None):
     tl.add_argument("--build", help="client build (default: the installed Forever build)")
     tl.add_argument("--refresh", action="store_true", help="download the file lists again")
     tl.set_defaults(fn=cmd_tiles)
+
+    zn = sub.add_parser("zones", help="write which zone owns each patch of ground, and the zones' outlines")
+    zn.add_argument("--build", help="client build (default: the installed Forever build)")
+    zn.add_argument("--refresh", action="store_true", help="download the tables again")
+    zn.set_defaults(fn=cmd_zones)
+
+    wa = sub.add_parser("worldart", help="bake the world map's painted sheets and copy its lettered names")
+    wa.add_argument("--build", help="client build (default: the installed Forever build)")
+    wa.add_argument("--refresh", action="store_true", help="download the tables again")
+    wa.set_defaults(fn=cmd_worldart)
 
     ma = sub.add_parser("mapart", help="bake the painted map for the Canvas (OpenMap's renderer over the game's art) into tiles")
     ma.add_argument("--build", help="client build (default: the installed Forever build)")

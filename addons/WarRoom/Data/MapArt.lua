@@ -13,8 +13,8 @@
 -- sea = { color, hatchAlpha, reach }: under the tiles, drawn live (Media/Bake/sea_*, hatch, coast_*)
 -- cities[uiMapID] = { zone = uiMapID, cut = true (Media/Bake/cut_<city> cuts its map down to the city; else
 --   Media/Bake/round), banner = { zone, x, y, w, h }: Media/Bake/banner_<city>, w x h art px at x, y on its
---   zone's map, title = true when the city's map has its own banner, early = true for a city whose map comes
---   in with the zones (under its banner: the tiles leave its ground blank) }
+--   zone's map, title = true when the city's map has its own banner (Orgrimmar's and Thunder Bluff's
+--   "banners" are their zones' whole drawings of them, which the tiles leave out) }
 -- underground[uiMapID]: cities under their zone's surface, only their banners drawn.
 local _, ns = ...
 ns.MapArt = {
@@ -81,8 +81,8 @@ ns.MapArt = {
 	},
 	cities = {
 		[1453] = { zone = 1429, cut = true }, -- Stormwind City
-		[1454] = { zone = 1411, cut = true, banner = { 1411, 276, 7, 512, 128 }, title = true, early = true }, -- Orgrimmar
-		[1456] = { zone = 1412, cut = true, banner = { 1412, 306, 226, 256, 64 }, title = true, early = true }, -- Thunder Bluff
+		[1454] = { zone = 1411, cut = true, banner = { 1411, 244, 0, 512, 256 }, title = true }, -- Orgrimmar
+		[1456] = { zone = 1412, cut = true, banner = { 1412, 250, 131, 512, 256 }, title = true }, -- Thunder Bluff
 		[1457] = { zone = 1438, cut = true, banner = { 1438, 113, 427, 512, 64 } }, -- Darnassus
 	},
 	underground = {

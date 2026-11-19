@@ -21,6 +21,14 @@
 --                           as they come in
 --   overlay   a frame over the rest for whatever the owner adds (lines, pins), placed with WorldToFrame
 --
+-- With the `world` option (the world map), the continents of Azeroth's map (uiMap 947) are drawn side by side as
+-- they lie on it, each through a scale and shift from its own yards into the view's continent's (Canvas.Convert),
+-- and the view's continent becomes whichever one its centre is over. Far out, Azeroth's own painting is the one sheet
+-- for the whole world; zoomed in, each continent's own painting comes in over it, cut down to its land and coast (the
+-- sea stays Azeroth's). Both are OpenMap's copies cleaned of their lettering (Media/Map: `warroom worldart`), the
+-- names lettered live by the world map. An island the game puts on Azeroth's map from a map of its own (Zephras
+-- Isle) is drawn with them, its painting cut down to the island, at every zoom.
+--
 -- Panning moves one frame (`world`) that holds the layers. Textures are laid out again only when the zoom changes.
 -- Every edge lands on a whole screen pixel (the world frame too), so neighbouring textures never show a seam.
 local _, ns = ...
@@ -30,6 +38,8 @@ local Coords = ns.Coords
 local Canvas = {}
 ns.Canvas = Canvas
 WR.Canvas = Canvas
+-- The names the world map letters over its painted sheets (Data/Labels.lua, OpenMap's).
+WR.MapLabels = ns.MapLabels
 
 local floor, ceil, max, min, huge = math.floor, math.ceil, math.max, math.min, math.huge
 local TILE = Coords.TILE_YARDS
@@ -49,6 +59,8 @@ Canvas.PAINT_WARM = 1.5
 
 Canvas.defaults = {
 	art = true, -- the painted continent map when zoomed far out
+	continentFull = 28, -- world map: the continents' own paintings fully over Azeroth's at this zoom and closer
+	continentNone = 33, -- world map: Azeroth's painting alone at this zoom and further out
 	zones = true, -- the detailed painted map
 	zonesFull = 20, -- detailed map fully shown at this zoom (yards per UI unit) and closer
 	zonesNone = 32, -- detailed map gone at this zoom and further out
@@ -63,7 +75,13 @@ Canvas.defaults = {
 	citiesFull = 8, -- city maps fully shown at this zoom and closer (in place of their zone's banner)
 	citiesNone = 12, -- city maps gone at this zoom and further out
 	margin = 1, -- extra tiles kept around the view
+	world = false, -- every continent on Azeroth's map in one view, with Azeroth's painting under them
 }
+
+-- Azeroth's map: the world's painting, and the map the painted tiles are baked on.
+Canvas.WORLD_MAP = 947
+-- Azeroth's map's art in its own units (its art pixels), which MapArt's `units` are counted in.
+local WORLD_W, WORLD_H = 1002, 668
 
 ---------------------------------------------------------------------------------------------------
 -- Game data lookups
@@ -75,6 +93,172 @@ end
 local function PaintData(continent)
 	local art = ns.MapArt
 	return art and art.continents and art.continents[continent]
+end
+
+-- Where a continent of Azeroth's map's own lies on it: { y0, ky, x0, kx } (MapArt's `units`), or nil.
+local function OwnUnits(continent)
+	local paint = PaintData(continent)
+	return paint and paint.units
+end
+
+local linked -- [map] = units of a map of its own the game puts on Azeroth's map (an island: Zephras Isle)
+
+-- Where such an island's map lies on Azeroth's map when the game won't say (its painting doesn't show it, and
+-- C_Map.GetMapRectOnMap has no answer): [uiMap] = the middle of its map, across and down Azeroth's (0 to 1). Ours:
+-- Zephras Isle out in the north of the Great Sea, between Kalimdor and the isles off Lordaeron.
+local ISLAND_PLACES = {
+	[2521] = { 0.482, 0.13 },
+}
+
+-- The game places such an island's zone on Azeroth's map (C_Map.GetMapRectOnMap), else ISLAND_PLACES at the
+-- continents' scale; its map's world rectangle then gives the same scale and shift as a continent's.
+local function Linked()
+	if linked then
+		return linked
+	end
+	linked = {}
+	if not ns.TileData then
+		return linked
+	end
+	local scale, first -- the first continent's { ky, kx }: yards an art pixel of Azeroth's map
+	for c, paint in pairs(ns.MapArt and ns.MapArt.continents or {}) do
+		if paint.units and (not first or c < first) then
+			scale, first = { paint.units[2], paint.units[4] }, c
+		end
+	end
+	for continent in pairs(ns.TileData) do
+		if type(continent) == "number" and not OwnUnits(continent) then
+			local id = Canvas.ArtMapFor(continent)
+			local info = id and C_Map.GetMapInfo(id)
+			local rect = info and info.parentMapID == Canvas.WORLD_MAP and Coords.GetMapRect(id)
+			if rect then
+				local minX, maxX, minY, maxY
+				if C_Map.GetMapRectOnMap then
+					minX, maxX, minY, maxY = C_Map.GetMapRectOnMap(id, Canvas.WORLD_MAP)
+				end
+				local place = ISLAND_PLACES[id]
+				if minX and maxX and minY and maxY and maxX > minX and maxY > minY then
+					local ky = rect.width / ((maxX - minX) * WORLD_W)
+					local kx = rect.height / ((maxY - minY) * WORLD_H)
+					linked[continent] = { rect.left + minX * WORLD_W * ky, ky, rect.top + minY * WORLD_H * kx, kx }
+				elseif place and scale then
+					local ky, kx = scale[1], scale[2]
+					local midY, midX = (rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2
+					linked[continent] = { midY + place[1] * WORLD_W * ky, ky, midX + place[2] * WORLD_H * kx, kx }
+				end
+			end
+		end
+	end
+	return linked
+end
+
+-- Where a continent lies on Azeroth's map: { y0, ky, x0, kx }, or nil when it isn't on it.
+local function Units(continent)
+	return OwnUnits(continent) or Linked()[continent]
+end
+
+-- (x, y) in continent `from`'s yards to continent `to`'s, the two laid out as on Azeroth's map; nil when either
+-- isn't on it.
+function Canvas.Convert(from, to, x, y)
+	if from == to then
+		return x, y
+	end
+	local a, b = Units(from), Units(to)
+	if not (a and b and x) then
+		return nil
+	end
+	local ux, uy = (a[1] - y) / a[2], (a[3] - x) / a[4]
+	return b[3] - uy * b[4], b[1] - ux * b[2]
+end
+
+-- The same as a scale and a shift, x' = ox + sx * x and y' = oy + sy * y; nil for none (or no way across).
+local function Transform(from, to)
+	local a, b = Units(from), Units(to)
+	if from == to or not (a and b) then
+		return nil
+	end
+	local sx, sy = b[4] / a[4], b[2] / a[2]
+	return { sx = sx, ox = b[3] - a[3] * sx, sy = sy, oy = b[1] - a[1] * sy }
+end
+
+-- Azeroth's map's rectangle in a continent's yards, or nil when the continent isn't on it.
+function Canvas.WorldRect(continent)
+	local u = Units(continent)
+	if not u then
+		return nil
+	end
+	local y0, ky, x0, kx = u[1], u[2], u[3], u[4]
+	return Coords.NewRect(continent, x0, y0, x0 - WORLD_H * kx, y0 - WORLD_W * ky)
+end
+
+local worldList -- the continents on Azeroth's map, in order: its own first, then the islands put on it
+
+function Canvas.WorldContinents()
+	if not worldList then
+		worldList = {}
+		for continent, paint in pairs(ns.MapArt and ns.MapArt.continents or {}) do
+			if paint.units then
+				worldList[#worldList + 1] = continent
+			end
+		end
+		table.sort(worldList)
+		local islands = {}
+		for continent in pairs(Linked()) do
+			islands[#islands + 1] = continent
+		end
+		table.sort(islands)
+		for _, continent in ipairs(islands) do
+			worldList[#worldList + 1] = continent
+		end
+	end
+	return worldList
+end
+
+-- Whether a continent is an island put on Azeroth's map (not one of its own, with a painting and sea of its own).
+function Canvas.IsIsland(continent)
+	return Linked()[continent] ~= nil
+end
+
+-- Whether a point lies in a world rectangle.
+local function InRect(rect, x, y)
+	return rect and x <= rect.top and x >= rect.bottom and y <= rect.left and y >= rect.right
+end
+
+-- The continent of Azeroth's map whose own map's rectangle holds (x, y) of continent `from`, and the point in its
+-- yards; nil when none does (out at sea between them).
+local function ArtRect(continent)
+	local id = Canvas.ArtMapFor(continent)
+	return id and Coords.GetMapRect(id)
+end
+
+-- The islands come first (they lie in the sea of a continent's map). With `own`, only Azeroth's own continents
+-- (the ones a view can be in the yards of): a point on none of their maps is given in the first one's yards.
+function Canvas.ContinentAt(from, x, y, own)
+	local list = Canvas.WorldContinents()
+	if not own then
+		for _, c in ipairs(list) do
+			if Linked()[c] then
+				local cx, cy = Canvas.Convert(from, c, x, y)
+				if cx and InRect(ArtRect(c), cx, cy) then
+					return c, cx, cy
+				end
+			end
+		end
+	end
+	if OwnUnits(from) and InRect(ArtRect(from), x, y) then
+		return from, x, y
+	end
+	for _, c in ipairs(list) do
+		if c ~= from and OwnUnits(c) then
+			local cx, cy = Canvas.Convert(from, c, x, y)
+			if cx and InRect(ArtRect(c), cx, cy) then
+				return c, cx, cy
+			end
+		end
+	end
+	if own and not OwnUnits(from) and Units(from) and OwnUnits(list[1]) then
+		return list[1], Canvas.Convert(from, list[1], x, y)
+	end
 end
 
 -- Centre (x, y) of a continent's terrain, for opening a view where there is something to see.
@@ -166,7 +350,9 @@ function Canvas.New(parent, options)
 	self.overlay:SetAllPoints(clip)
 	self.overlay:SetFrameLevel(self.level + 20)
 
-	self.tiles = {} -- [tile key] = { tex, mask, stamp }
+	self.tiles = {} -- [continent * 4096 + tile key] = { tex, mask, stamp, continent, key }
+	self.xfs = {} -- [continent] = its Transform into the view's continent (false: none)
+	self.layout = 0 -- counts layouts, so a group laid out under an older one is laid out again as it shows
 	self.freeTiles = {}
 	self.freeMasks = {}
 	self.groups = {} -- [continent] = the painted layers built for it (BuildPaint)
@@ -196,14 +382,22 @@ end
 -- Shows (x, y) of a continent at the canvas's centre, `ypp` yards per UI unit (default: keep the zoom).
 function Proto:SetView(continent, x, y, ypp)
 	ypp = ypp or self.ypp or 10
+	-- On the world map the view's continent is the one under its centre (kept while out at sea; never an island,
+	-- which has no sea or Azeroth's painting of its own to draw under the rest).
+	if self.options.world then
+		local c, cx, cy = Canvas.ContinentAt(continent, x, y, true)
+		if c then
+			continent, x, y = c, cx, cy
+		end
+	end
 	if continent ~= self.continent then
-		self:ReleaseTiles()
-		local old = self.groups[self.continent]
-		if old then
-			old.root:Hide()
+		local across = self.options.world and Units(continent) and self.continent and Units(self.continent)
+		if not across then
+			self:ReleaseTiles()
 		end
 		self.continent = continent
 		self.layoutYpp = nil
+		self.xfs = {}
 	end
 	self.cx, self.cy, self.ypp = x, y, ypp
 	self:Update()
@@ -230,14 +424,78 @@ function Proto:SetOptions(changes)
 	self:Update()
 end
 
--- World (x, y) to an offset from the canvas's centre in its UI units (right and up positive).
-function Proto:WorldToFrame(x, y)
+-- World (x, y) to an offset from the centre of the world frame (self.world) at the current layout: for the owner's
+-- own regions on a frame over it, which then pan with it and need placing again only when self.layout changes.
+-- nil for a point of another continent that can't be carried across.
+function Proto:ToLayout(x, y, continent)
+	if continent and continent ~= self.continent then
+		x, y = Canvas.Convert(continent, self.continent, x, y)
+		if not x then
+			return nil
+		end
+	end
+	return (self.anchorY - y) / self.layoutYpp, (x - self.anchorX) / self.layoutYpp
+end
+
+-- World (x, y) to an offset from the canvas's centre in its UI units (right and up positive). A point of another
+-- continent (`continent`) is carried across Azeroth's map; nil when it can't be.
+function Proto:WorldToFrame(x, y, continent)
+	if continent and continent ~= self.continent then
+		x, y = Canvas.Convert(continent, self.continent, x, y)
+		if not x then
+			return nil
+		end
+	end
 	return (self.cy - y) / self.ypp, (x - self.cx) / self.ypp
 end
 
--- An offset from the canvas's centre (right and up positive) to world (x, y).
+-- An offset from the canvas's centre (right and up positive) to world (x, y) of the view's continent.
 function Proto:FrameToWorld(dx, dy)
 	return self.cx + dy * self.ypp, self.cy - dx * self.ypp
+end
+
+-- The same as continent, x, y: on the world map, of the continent whose map holds the point.
+function Proto:FrameToContinent(dx, dy)
+	local x, y = self:FrameToWorld(dx, dy)
+	if self.options.world then
+		local c, cx, cy = Canvas.ContinentAt(self.continent, x, y)
+		if c then
+			return c, cx, cy
+		end
+	end
+	return self.continent, x, y
+end
+
+-- The Transform from a continent's yards into the view's continent's (nil: the same yards).
+function Proto:Xf(continent)
+	local xf = self.xfs[continent]
+	if xf == nil then
+		xf = Transform(continent, self.continent) or false
+		self.xfs[continent] = xf
+	end
+	return xf or nil
+end
+
+-- The continents drawn: the view's own, and on the world map every one on Azeroth's map with it.
+function Proto:DrawList()
+	if self.options.world and Units(self.continent) then
+		return Canvas.WorldContinents()
+	end
+	self.single = self.single or {}
+	self.single[1] = self.continent
+	return self.single
+end
+
+-- The view's rectangle (north, south, west, east) in a continent's own yards, `grow` times its size.
+function Proto:ViewIn(continent, w, h, grow)
+	local halfW, halfH = w / 2 * self.ypp * grow, h / 2 * self.ypp * grow
+	local north, west = self.cx + halfH, self.cy + halfW
+	local south, east = self.cx - halfH, self.cy - halfW
+	if continent ~= self.continent then
+		north, west = Canvas.Convert(self.continent, continent, north, west)
+		south, east = Canvas.Convert(self.continent, continent, south, east)
+	end
+	return north, south, west, east
 end
 
 -- Called with (canvas) after every redraw, so the owner can place its overlay.
@@ -260,8 +518,13 @@ local function Snap(v, px)
 end
 
 -- Places a texture (or mask) over world rectangle (x0, y0) north-west to (x1, y1) south-east, snapped to pixels,
--- relative to the layout's anchor. Its parent must cover the world frame.
-function Proto:Place(tex, x0, y0, x1, y1)
+-- relative to the layout's anchor; `xf` carries a rectangle of another continent across. Its parent must cover the
+-- world frame.
+function Proto:Place(tex, x0, y0, x1, y1, xf)
+	if xf then
+		x0, x1 = xf.ox + xf.sx * x0, xf.ox + xf.sx * x1
+		y0, y1 = xf.oy + xf.sy * y0, xf.oy + xf.sy * y1
+	end
 	local ax, ay, ypp, px = self.anchorX, self.anchorY, self.layoutYpp, self.pixel
 	local left = Snap((ay - y0) / ypp, px)
 	local right = Snap((ay - y1) / ypp, px)
@@ -272,16 +535,27 @@ function Proto:Place(tex, x0, y0, x1, y1)
 	tex:SetSize(max(right - left, px), max(top - bottom, px))
 end
 
-function Proto:PlaceTile(key, rec)
+function Proto:PlaceTile(rec)
+	local key = rec.key
 	local tx, ty = floor(key / 64), key % 64
 	local x0, y0 = Coords.TileToWorld(tx, ty)
-	self:Place(rec.tex, x0, y0, x0 - TILE, y0 - TILE)
+	self:Place(rec.tex, x0, y0, x0 - TILE, y0 - TILE, self:Xf(rec.continent))
 end
 
 -- Lays out a list of { region, x0, y0, x1, y1 } placements.
-function Proto:PlaceAll(list)
+function Proto:PlaceAll(list, xf)
 	for _, p in ipairs(list) do
-		self:Place(p[1], p[2], p[3], p[4], p[5])
+		self:Place(p[1], p[2], p[3], p[4], p[5], xf)
+	end
+end
+
+-- A group of painted layers (a continent's, or Azeroth's painting) laid out for the current layout, if it isn't.
+function Proto:LayOut(group)
+	if group.layout ~= self.layout or group.ref ~= self.continent then
+		group.layout, group.ref = self.layout, self.continent
+		group.xf = self:Xf(group.continent)
+		group.seaBox = nil
+		self:PlaceAll(group.placed, group.xf)
 	end
 end
 
@@ -294,16 +568,13 @@ function Proto:Update()
 	local started = debugprofilestop()
 	local ypp, options = self.ypp, self.options
 	self.pixel = PixelSize(clip)
-	local group = self.groups[self.continent]
 
-	-- A new zoom: lay everything out again around the current centre.
+	-- A new zoom: lay everything out again around the current centre (the painted groups as they show: LayOut).
 	if self.layoutYpp ~= ypp then
 		self.anchorX, self.anchorY, self.layoutYpp = self.cx, self.cy, ypp
-		for key, rec in pairs(self.tiles) do
-			self:PlaceTile(key, rec)
-		end
-		if group then
-			self:PlaceAll(group.placed)
+		self.layout = self.layout + 1
+		for _, rec in pairs(self.tiles) do
+			self:PlaceTile(rec)
 		end
 	end
 
@@ -323,89 +594,115 @@ function Proto:Update()
 	local mix = options.zones and Ramp(ypp, options.zonesFull, options.zonesNone) or 0
 	local paper = options.zones and options.sea and Ramp(ypp, options.seaFull, options.seaNone) or 0
 	local city = options.cities and Ramp(ypp, options.citiesFull, options.citiesNone) or 0
-	-- Cities whose ground the painted map leaves blank (Orgrimmar, Thunder Bluff) come in with it, under their banners.
-	local early = options.cities and Ramp(ypp, options.citiesNone, options.zonesFull) or 0
 
-	if (mix < 1 and options.art) or mix > 0 then
-		if not group then
-			group = self:BuildPaint()
+	-- The continent's painting stays under the detailed map (its ocean shows through the tiles' clear sea) until
+	-- the sea's paper takes over; the sea shows under it only once it starts to go (or without it). On the world
+	-- map the view's continent's sea is everyone's, always under them (Azeroth's painting on it, going as the
+	-- continents' paintings go), and the other continents draw none.
+	local world = options.world and Units(self.continent) and true
+	local art = options.art and 1 - paper or 0
+	-- (world map: the continents' own paintings over Azeroth's)
+	local land = world and Ramp(ypp, options.continentFull, options.continentNone) or 1
+	local list, drawn = self:DrawList(), {}
+	self.stats.zones, self.stats.level = 0, nil
+	local stats = self.stats
+	stats.art, stats.cities = 0, 0
+	for _, continent in ipairs(list) do
+		local group = self.groups[continent]
+		if not group and ((mix < 1 and options.art) or mix > 0 or world) then
+			group = self:BuildPaint(continent)
+		end
+		if group then
+			drawn[group] = true
+			self:LayOut(group)
+			local owner = continent == self.continent
+			local sea = owner and group.sea ~= nil and (world or (options.zones and options.sea and mix > 0 and art < 1))
+			local showPaint = mix > 0 and group.hasPaint
+			-- (an island's painting is all it has until its terrain: it stays as the sea paper comes in)
+			local artAlpha = group.fades and art * land or art
+			if world and Canvas.IsIsland(continent) then
+				artAlpha = options.art and 1 or 0
+			end
+			group.root:SetShown(detail > 0 and (artAlpha > 0 or art > 0 or sea or showPaint))
+			group.root:SetAlpha(detail)
+			group.art:SetShown(artAlpha > 0)
+			group.art:SetAlpha(artAlpha)
+			if group.sea then
+				group.sea:SetShown(sea)
+				for _, p in ipairs(group.worldArt) do
+					p[1]:SetShown(art > 0)
+					p[1]:SetAlpha(art)
+				end
+			end
+			group.paint:SetShown(showPaint)
+			group.paint:SetAlpha(mix)
+			if detail > 0 and (sea or showPaint) and group.seaInfo then
+				self:UpdateSea(group, w, h, sea)
+			end
+			if detail > 0 and showPaint then
+				self:UpdatePaint(group, w, h, city)
+			end
+			stats.art = stats.art + #group.artPlaced
+			stats.cities = stats.cities + #group.cities
 		end
 	end
-	self.stats.zones, self.stats.level = 0, nil
-	if group then
-		-- The continent's painting stays under the detailed map (its ocean shows through the tiles' clear sea) until
-		-- the sea's paper takes over; the sea shows under it only once it starts to go (or without it).
-		local art = options.art and 1 - paper or 0
-		local sea = group.sea ~= nil and options.zones and options.sea and mix > 0 and art < 1
-		local showPaint = mix > 0 and group.hasPaint
-		group.root:SetShown(detail > 0 and (art > 0 or sea or showPaint))
-		group.root:SetAlpha(detail)
-		group.art:SetShown(art > 0)
-		group.art:SetAlpha(art)
-		if group.sea then
-			group.sea:SetShown(sea)
-		end
-		group.paint:SetShown(showPaint)
-		group.paint:SetAlpha(mix)
-		if detail > 0 and (sea or showPaint) and group.seaInfo then
-			self:UpdateSea(group, w, h)
-		end
-		if detail > 0 and showPaint then
-			self:UpdatePaint(group, w, h, city, early)
+	for _, group in pairs(self.groups) do
+		if not drawn[group] then
+			group.root:Hide()
 		end
 	end
 
 	-- The terrain is loaded a little before the paintings start to fade, so it is there when they do.
 	local wantTerrain = options.terrain and ypp < options.terrainNone * 1.25
 	if wantTerrain then
-		self:UpdateTiles(w, h)
+		self:UpdateTiles(w, h, list)
 	else
 		self:ReleaseTiles()
 		self.pending = false
 	end
 
-	local stats = self.stats
 	stats.alpha, stats.zoneAlpha, stats.cityAlpha, stats.pending = 1 - detail, mix, city, self.pending
-	stats.art = group and #group.artPlaced or 0
-	stats.cities = group and #group.cities or 0
+	stats.landAlpha, stats.paperAlpha = land, paper
 	stats.ms = debugprofilestop() - started
 	if self.onUpdate then
 		self.onUpdate(self)
 	end
 end
 
-function Proto:UpdateTiles(w, h)
-	local data = Canvas.TileData(self.continent)
-	if not data then
-		return
-	end
-	local files, fades = data.files, self.options.fade and data.fade or nil
-	local ypp, cx, cy, margin = self.ypp, self.cx, self.cy, self.options.margin
-	local halfW, halfH = w / 2 * ypp, h / 2 * ypp
-	local txMin = max(0, floor(32 - (cy + halfW) / TILE) - margin)
-	local txMax = min(63, floor(32 - (cy - halfW) / TILE) + margin)
-	local tyMin = max(0, floor(32 - (cx + halfH) / TILE) - margin)
-	local tyMax = min(63, floor(32 - (cx - halfH) / TILE) + margin)
-
+-- The terrain tiles in view of every continent drawn (`list`), each continent's in its own yards.
+function Proto:UpdateTiles(w, h, list)
 	local stamp = self.stamp + 1
 	self.stamp = stamp
 	local tiles, started, pending = self.tiles, 0, false
-	for tx = txMin, txMax do
-		for ty = tyMin, tyMax do
-			local key = tx * 64 + ty
-			local fileID = files[key]
-			if fileID then
-				local rec = tiles[key]
-				if rec then
-					rec.stamp = stamp
-				elseif started < Canvas.NEW_TILES_PER_FRAME then
-					started = started + 1
-					rec = self:AcquireTile(fileID, fades and fades[key])
-					rec.stamp = stamp
-					tiles[key] = rec
-					self:PlaceTile(key, rec)
-				else
-					pending = true
+	local margin = self.options.margin
+	for _, continent in ipairs(list) do
+		local data = Canvas.TileData(continent)
+		if data then
+			local files, fades = data.files, self.options.fade and data.fade or nil
+			local north, south, west, east = self:ViewIn(continent, w, h, 1)
+			local txMin = max(0, floor(32 - west / TILE) - margin)
+			local txMax = min(63, floor(32 - east / TILE) + margin)
+			local tyMin = max(0, floor(32 - north / TILE) - margin)
+			local tyMax = min(63, floor(32 - south / TILE) + margin)
+			for tx = txMin, txMax do
+				for ty = tyMin, tyMax do
+					local key = tx * 64 + ty
+					local fileID = files[key]
+					if fileID then
+						local id = continent * 4096 + key
+						local rec = tiles[id]
+						if rec then
+							rec.stamp = stamp
+						elseif started < Canvas.NEW_TILES_PER_FRAME then
+							started = started + 1
+							rec = self:AcquireTile(fileID, fades and fades[key])
+							rec.stamp, rec.continent, rec.key = stamp, continent, key
+							tiles[id] = rec
+							self:PlaceTile(rec)
+						else
+							pending = true
+						end
+					end
 				end
 			end
 		end
@@ -435,7 +732,9 @@ function Proto:AcquireTile(fileID, fadeKey)
 	rec.tex:SetTexture(fileID, "CLAMP", "CLAMP", "TRILINEAR")
 	if fadeKey then
 		local mask = table.remove(self.freeMasks) or self.terrainLayer:CreateMaskTexture()
-		mask:SetTexture(FADE_PATH .. fadeKey, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+		-- (clamped to its own edge: clamped to black, the outer half of its edge texels, a few screen pixels of a
+		-- 64-texel mask stretched over a tile, faded every side into the sea, even the sides with land beside them)
+		mask:SetTexture(FADE_PATH .. fadeKey, "CLAMP", "CLAMP")
 		mask:SetAllPoints(rec.tex)
 		mask:Show()
 		rec.tex:AddMaskTexture(mask)
@@ -569,7 +868,7 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 	local y0, ky, x0, kx = unpack(paint.units)
 	-- (u, v) of Azeroth's map, 0 to 1 across and down, to this continent's world (x, y)
 	local function Azeroth(u, v)
-		return x0 - v * 668 * kx, y0 - u * 1002 * ky
+		return x0 - v * WORLD_H * kx, y0 - u * WORLD_W * ky
 	end
 	local color = sea:CreateTexture(nil, "BACKGROUND", nil, -8)
 	color:SetAllPoints(self.frame)
@@ -593,6 +892,13 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 		tex:Hide()
 		group.paper[i] = tex
 	end
+	-- On the world map, Azeroth's own painting over it all: the ocean between and around the continents' maps.
+	group.worldArt = {}
+	if self.options.world then
+		local north, west = Azeroth(0, 0)
+		local south, east = Azeroth(1, 1)
+		AddTexture(group, group.worldArt, sea, MEDIA .. "Map\\world", north, west, south, east)
+	end
 	group.hatch = {}
 	if artRect then
 		local coast = AddMask(group, hatchFrame, ("%sBake\\coast_%d"):format(MEDIA, artMap), artRect)
@@ -608,9 +914,8 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 	return sea
 end
 
-function Proto:BuildPaint()
-	local continent = self.continent
-	local group = { placed = {}, artPlaced = {}, levels = {}, cities = {}, banners = {} }
+function Proto:BuildPaint(continent)
+	local group = { continent = continent, placed = {}, artPlaced = {}, levels = {}, cities = {}, banners = {}, worldArt = {} }
 	self.groups[continent] = group
 	local data, paint = ns.MapArt, PaintData(continent)
 
@@ -619,10 +924,15 @@ function Proto:BuildPaint()
 	group.art = self:Layer(3, group.root)
 	group.paint = self:Layer(4, group.root)
 
-	-- The continent's own painting.
+	-- The continent's own painting. On the world map, its land and coast, coming in over Azeroth's painting as you
+	-- zoom in (`fades`); an island's, cut down to the island.
 	local artMap = Canvas.ArtMapFor(continent)
 	local artRect = artMap and Coords.GetMapRect(artMap)
-	if artRect then
+	if artRect and self.options.world and Units(continent) then
+		local file = ("%sMap\\%s_%d"):format(MEDIA, OwnUnits(continent) and "land" or "isle", artMap)
+		AddTexture(group, group.artPlaced, group.art, file, artRect.top, artRect.left, artRect.bottom, artRect.right)
+		group.fades = OwnUnits(continent) ~= nil
+	elseif artRect then
 		AddBaseArt(group, group.artPlaced, group.art, artMap, artRect)
 	end
 
@@ -661,7 +971,7 @@ function Proto:BuildPaint()
 			AddBaseArt(group, nil, frame, cityID, rect, mask)
 			local x0, y0 = Coords.RectToWorld(rect, 0, 0)
 			local x1, y1 = Coords.RectToWorld(rect, 1, 1)
-			group.cities[#group.cities + 1] = { frame = frame, early = entry.early, north = x0, west = y0, south = x1, east = y1 }
+			group.cities[#group.cities + 1] = { frame = frame, north = x0, west = y0, south = x1, east = y1 }
 			-- The zone's banner for the city gives way to the city's own map (which has its own small label).
 			AddBanner(cityID, entry, true)
 		end
@@ -671,15 +981,12 @@ function Proto:BuildPaint()
 	end
 
 	group.hasPaint = #group.levels > 0 or #group.cities > 0
-	if self.layoutYpp then
-		self:PlaceAll(group.placed)
-	end
 	return group
 end
 
 -- A repeating texture over world rectangle `box`, a tile every sx by sy yards, fixed on the world (shifted by
 -- `shift` tiles, so two sizes of one pattern don't line up).
-function Proto:TileOver(tex, box, sx, sy, alpha, shift)
+function Proto:TileOver(tex, box, sx, sy, alpha, shift, xf)
 	if not tex then
 		return
 	end
@@ -689,7 +996,7 @@ function Proto:TileOver(tex, box, sx, sy, alpha, shift)
 	end
 	local o = shift or 0
 	tex:SetTexCoord(-box.west / sx + o, -box.east / sx + o, -box.north / sy + o * 1.6, -box.south / sy + o * 1.6)
-	self:Place(tex, box.north, box.west, box.south, box.east)
+	self:Place(tex, box.north, box.west, box.south, box.east, xf)
 	tex:SetAlpha(alpha)
 	tex:Show()
 end
@@ -705,40 +1012,38 @@ end
 -- Per redraw (when the zoom changes or the view nears its edge): the sea's paper and the hatching laid over a box
 -- round the view, the size each is drawn at kept on screen (Stitch.lua's S.SetSea).
 function Proto:UpdateSea(group, w, h)
-	local ypp, cx, cy = self.ypp, self.cx, self.cy
-	local halfW, halfH = w / 2 * ypp, h / 2 * ypp
+	local ypp, c = self.ypp, group.continent
 	local box = group.seaBox
-	if box and box.ypp == ypp and box.ax == self.anchorX and box.ay == self.anchorY and cx + halfH * 1.2 < box.north
-		and cx - halfH * 1.2 > box.south and cy + halfW * 1.2 < box.west and cy - halfW * 1.2 > box.east then
+	local north, south, west, east = self:ViewIn(c, w, h, 1.2)
+	if box and box.ypp == ypp and box.layout == self.layout and north < box.north and south > box.south
+		and west < box.west and east > box.east then
 		return
 	end
-	box = { ypp = ypp, ax = self.anchorX, ay = self.anchorY, north = cx + halfH * 1.8, south = cx - halfH * 1.8,
-		west = cy + halfW * 1.8, east = cy - halfW * 1.8 }
+	north, south, west, east = self:ViewIn(c, w, h, 1.8)
+	box = { ypp = ypp, layout = self.layout, north = north, south = south, west = west, east = east }
 	group.seaBox = box
-	local info = group.seaInfo
+	local info, xf = group.seaInfo, group.xf
 	local n, f = Octaves(info.tile / ypp, info.tileMax)
 	local size = info.tile / 2 ^ n
 	for i = 1, 2 do
-		self:TileOver(group.paper[i], box, size, size, 1 - f, (n * 0.37) % 1)
-		self:TileOver(group.paper[i + 2], box, size / 2, size / 2, f, ((n + 1) * 0.37) % 1)
+		self:TileOver(group.paper[i], box, size, size, 1 - f, (n * 0.37) % 1, xf)
+		self:TileOver(group.paper[i + 2], box, size / 2, size / 2, f, ((n + 1) * 0.37) % 1, xf)
 	end
 	local a = ns.MapArt.sea.hatchAlpha
 	n, f = Octaves(info.hatch[1] / ypp, info.hatchMax)
 	local hw, hh = info.hatch[1] / 2 ^ n, info.hatch[2] / 2 ^ n
-	self:TileOver(group.hatch[1], box, hw, hh, a * math.sqrt(1 - f))
-	self:TileOver(group.hatch[2], box, hw / 2, hh / 2, a * math.sqrt(f))
+	self:TileOver(group.hatch[1], box, hw, hh, a * math.sqrt(1 - f), nil, xf)
+	self:TileOver(group.hatch[2], box, hw / 2, hh / 2, a * math.sqrt(f), nil, xf)
 end
 
 -- Per redraw: the tiles of the size that shows (and of each coarser one where there are no finer ones) in view, the
 -- next finer size's loaded as it nears, every other tile's file let go; cities out of view hidden, and the city maps
--- and their zones' banners trading places by `city` (0 = banners, 1 = city maps). An early city's map is in by
--- `early` already, under its banner.
-function Proto:UpdatePaint(group, w, h, city, early)
-	local ypp, cx, cy = self.ypp, self.cx, self.cy
-	local halfW, halfH = w / 2 * ypp, h / 2 * ypp
-	local north, south, west, east = cx + halfH, cx - halfH, cy + halfW, cy - halfW
+-- and their zones' banners trading places by `city` (0 = banners, 1 = city maps).
+function Proto:UpdatePaint(group, w, h, city)
+	local ypp = self.ypp
+	local north, south, west, east = self:ViewIn(group.continent, w, h, 1)
 	-- (tiles a little past the view count as in it, so they are loaded before they scroll in)
-	local mh, mw = halfH * 0.25, halfW * 0.25
+	local mh, mw = (north - south) * 0.125, (west - east) * 0.125
 	local levels, screen = group.levels, ypp * self.pixel -- yards a screen pixel
 	local show = #levels
 	for n, level in ipairs(levels) do
@@ -761,7 +1066,7 @@ function Proto:UpdatePaint(group, w, h, city, early)
 					t.tex:SetTexCoord(inset, 1 - inset, inset, 1 - inset)
 					local p = { t.tex, t.north, t.west, t.south, t.east }
 					group.placed[#group.placed + 1] = p
-					self:Place(t.tex, t.north, t.west, t.south, t.east)
+					self:Place(t.tex, t.north, t.west, t.south, t.east, group.xf)
 				end
 				t.tex:SetTexture(t.path, "CLAMP", "CLAMP", "TRILINEAR")
 				t.loaded = true
@@ -779,15 +1084,16 @@ function Proto:UpdatePaint(group, w, h, city, early)
 		end
 	end
 	for _, c in ipairs(group.cities) do
-		local alpha = c.early and max(city, early) or city
-		c.frame:SetShown(alpha > 0 and InView(c, north, south, west, east))
-		c.frame:SetAlpha(alpha)
+		c.frame:SetShown(city > 0 and InView(c, north, south, west, east))
+		c.frame:SetAlpha(city)
 	end
 	for _, b in ipairs(group.banners) do
 		local alpha = b.fades and 1 - city or 1
 		b.frame:SetShown(alpha > 0 and InView(b, north, south, west, east))
 		b.frame:SetAlpha(alpha)
 	end
-	self.stats.zones = shown
-	self.stats.level = levels[show] and levels[show].kind
+	self.stats.zones = self.stats.zones + shown
+	if shown > 0 or group.continent == self.continent then
+		self.stats.level = levels[show] and levels[show].kind
+	end
 end
