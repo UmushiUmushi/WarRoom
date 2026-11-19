@@ -26,5 +26,6 @@ Core\Canvas.lua
 Core\DB.lua
 Core\Position.lua
 Core\Slash.lua
+Core\Options.lua
 
 Dev\CanvasTest.lua

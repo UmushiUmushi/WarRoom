@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: WarRoom Minimap
+## Notes: WarRoom's map in the minimap's place, under the game's own minimap icons; other addons' minimap buttons in one hub.
+## Author: WarRoom
+## Version: 0.1.0-dev
+## X-License: GPL-3.0-or-later
+## Dependencies: WarRoom
+
+Minimap.lua
+Marks.lua
+Hub.lua

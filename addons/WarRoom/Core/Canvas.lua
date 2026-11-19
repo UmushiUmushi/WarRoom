@@ -31,6 +31,10 @@
 --
 -- Panning moves one frame (`world`) that holds the layers. Textures are laid out again only when the zoom changes.
 -- Every edge lands on a whole screen pixel (the world frame too), so neighbouring textures never show a seam.
+--
+-- With the `shape` option (the minimap's), every texture is drawn through a mask over the whole canvas, so the canvas
+-- can be round (SetShape changes it). A frame only clips to its rectangle; a mask on each texture is how the game's
+-- own round frames are cut.
 local _, ns = ...
 local WR = ns.WR
 local Coords = ns.Coords
@@ -76,7 +80,13 @@ Canvas.defaults = {
 	citiesNone = 12, -- city maps gone at this zoom and further out
 	margin = 1, -- extra tiles kept around the view
 	world = false, -- every continent on Azeroth's map in one view, with Azeroth's painting under them
+	shape = nil, -- a mask texture the whole canvas is cut by (white shows), or nil for none: fixed when made
+	smooth = false, -- pan by fractions of a screen pixel (the minimap, following the player): fixed when made
+	overlayLevel = 20, -- frame levels the overlay (the owner's pins and lines) sits above the canvas: fixed when made
 }
+
+-- A mask that shows everything (for a shaped canvas made square).
+Canvas.SQUARE = "Interface\\Buttons\\WHITE8X8"
 
 -- Azeroth's map: the world's painting, and the map the painted tiles are baked on.
 Canvas.WORLD_MAP = 947
@@ -333,8 +343,9 @@ function Canvas.New(parent, options)
 	clip:SetAllPoints(parent)
 	clip:SetClipsChildren(true)
 	self.frame = clip
+	self.masks = {} -- [frame] = the shape's mask for the textures on it
 
-	local sea = clip:CreateTexture(nil, "BACKGROUND")
+	local sea = self:NewTexture(clip, "BACKGROUND")
 	sea:SetAllPoints()
 	sea:SetColorTexture(unpack(Canvas.SEA_COLOR))
 
@@ -344,11 +355,12 @@ function Canvas.New(parent, options)
 	self.world = world
 
 	self.level = clip:GetFrameLevel()
+	self.layers = {} -- [frame] = its levels above the canvas (Layer), for SetLevel
 	self.terrainLayer = self:Layer(1)
 	-- For the owner's lines and pins: same size as the canvas, offsets from its centre (WorldToFrame).
 	self.overlay = CreateFrame("Frame", nil, clip)
 	self.overlay:SetAllPoints(clip)
-	self.overlay:SetFrameLevel(self.level + 20)
+	self.overlay:SetFrameLevel(self.level + self.options.overlayLevel)
 
 	self.tiles = {} -- [continent * 4096 + tile key] = { tex, mask, stamp, continent, key }
 	self.xfs = {} -- [continent] = its Transform into the view's continent (false: none)
@@ -371,12 +383,82 @@ function Canvas.New(parent, options)
 	return self
 end
 
+-- Every texture of the canvas is made here: on a shaped canvas, drawn through the shape's mask (one per frame, over
+-- the whole canvas: a texture is masked by masks of its own frame).
+function Proto:NewTexture(frame, layer, sublevel)
+	local tex = frame:CreateTexture(nil, layer or "ARTWORK", nil, sublevel)
+	if self.options.smooth then
+		Canvas.Unsnap(tex)
+	end
+	local shape = self.options.shape
+	if shape then
+		local mask = self.masks[frame]
+		if not mask then
+			mask = frame:CreateMaskTexture()
+			mask:SetTexture(shape, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+			mask:SetAllPoints(self.frame)
+			self.masks[frame] = mask
+		end
+		tex:AddMaskTexture(mask)
+	end
+	return tex
+end
+
+-- A region the game draws where it is put, not moved to the nearest whole screen pixel (as it otherwise does), so
+-- it glides with a smooth canvas.
+function Canvas.Unsnap(region)
+	if region.SetSnapToPixelGrid then
+		region:SetSnapToPixelGrid(false)
+		region:SetTexelSnappingBias(0)
+	end
+end
+
+-- A shaped canvas's shape changed (a mask texture: Canvas.SQUARE for none).
+function Proto:SetShape(shape)
+	if not self.options.shape or shape == self.options.shape then
+		return
+	end
+	self.options.shape = shape
+	for _, mask in pairs(self.masks) do
+		mask:SetTexture(shape, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+	end
+end
+
 -- A frame covering the world frame (so its centre is the layout's anchor), drawn `offset` levels above the canvas.
 function Proto:Layer(offset, parent)
 	local layer = CreateFrame("Frame", nil, parent or self.world)
 	layer:SetAllPoints(self.world)
 	layer:SetFrameLevel(self.level + offset)
+	self.layers[layer] = offset
 	return layer
+end
+
+-- Puts the canvas's frames at `level` and their own levels above it again (after its owner moved it to another
+-- strata, which may move or flatten the levels of everything in it). `fixed`: each level then kept by the game when
+-- the frames' parents are raised (Canvas.FixLevel).
+function Proto:SetLevel(level, fixed)
+	local set = fixed and Canvas.FixLevel or function(frame, l)
+		frame:SetFrameLevel(l)
+	end
+	self.level = level
+	set(self.frame, level)
+	set(self.world, level)
+	for layer, offset in pairs(self.layers) do
+		set(layer, level + offset)
+	end
+	set(self.overlay, level + self.options.overlayLevel)
+end
+
+-- A frame at `level`, kept there by the game (not moved with its parent's level, as a click on a "toplevel" parent
+-- raises it and everything in it), where the client can.
+function Canvas.FixLevel(frame, level)
+	if frame.SetFixedFrameLevel then
+		frame:SetFixedFrameLevel(false)
+	end
+	frame:SetFrameLevel(level)
+	if frame.SetFixedFrameLevel then
+		frame:SetFixedFrameLevel(true)
+	end
 end
 
 -- Shows (x, y) of a continent at the canvas's centre, `ypp` yards per UI unit (default: keep the zoom).
@@ -580,10 +662,14 @@ function Proto:Update()
 
 	-- Panning: move the layout so its anchor sits where it belongs, on a whole screen pixel (measured from the
 	-- screen's corner, so every texture edge inside it is on one too).
+	-- (a smooth canvas moves by fractions of a pixel: the textures inside still meet exactly, all shifted alike)
 	local px = self.pixel
-	local centerX, centerY = clip:GetCenter()
-	local east = Snap(centerX + (self.cy - self.anchorY) / ypp, px) - centerX
-	local north = Snap(centerY + (self.anchorX - self.cx) / ypp, px) - centerY
+	local east, north = (self.cy - self.anchorY) / ypp, (self.anchorX - self.cx) / ypp
+	if not options.smooth then
+		local centerX, centerY = clip:GetCenter()
+		east = Snap(centerX + east, px) - centerX
+		north = Snap(centerY + north, px) - centerY
+	end
 	self.world:ClearAllPoints()
 	self.world:SetPoint("CENTER", clip, "CENTER", east, north)
 
@@ -726,7 +812,7 @@ end
 function Proto:AcquireTile(fileID, fadeKey)
 	local rec = table.remove(self.freeTiles)
 	if not rec then
-		rec = { tex = self.terrainLayer:CreateTexture(nil, "ARTWORK") }
+		rec = { tex = self:NewTexture(self.terrainLayer, "ARTWORK") }
 		rec.tex:SetTexCoord(INSET, 1 - INSET, INSET, 1 - INSET)
 	end
 	rec.tex:SetTexture(fileID, "CLAMP", "CLAMP", "TRILINEAR")
@@ -772,7 +858,7 @@ end
 
 -- A texture on `frame` showing (0, 0)-(u1, v1) of a file over world rectangle (x0, y0)-(x1, y1).
 local function AddTexture(group, list, frame, file, x0, y0, x1, y1, u1, v1, layer, sublevel)
-	local tex = frame:CreateTexture(nil, layer or "ARTWORK", nil, sublevel)
+	local tex = group.canvas:NewTexture(frame, layer, sublevel)
 	tex:SetTexture(file, "CLAMP", "CLAMP", "TRILINEAR")
 	tex:SetTexCoord(0, u1 or 1, 0, v1 or 1)
 	local p = { tex, x0, y0, x1, y1 }
@@ -870,7 +956,7 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 	local function Azeroth(u, v)
 		return x0 - v * WORLD_H * kx, y0 - u * WORLD_W * ky
 	end
-	local color = sea:CreateTexture(nil, "BACKGROUND", nil, -8)
+	local color = self:NewTexture(sea, "BACKGROUND", -8)
 	color:SetAllPoints(self.frame)
 	color:SetColorTexture(unpack(data.sea.color))
 	local reach = data.sea.reach
@@ -887,7 +973,7 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 	end
 	group.paper = {}
 	for i = 1, 4 do
-		local tex = sea:CreateTexture(nil, "BACKGROUND", nil, -5 + i)
+		local tex = self:NewTexture(sea, "BACKGROUND", -5 + i)
 		tex:SetTexture(MEDIA .. "Bake\\" .. (i % 2 == 1 and "sea_dark" or "sea_light"), "REPEAT", "REPEAT", "TRILINEAR")
 		tex:Hide()
 		group.paper[i] = tex
@@ -903,7 +989,7 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 	if artRect then
 		local coast = AddMask(group, hatchFrame, ("%sBake\\coast_%d"):format(MEDIA, artMap), artRect)
 		for i = 1, 2 do
-			local tex = hatchFrame:CreateTexture(nil, "ARTWORK")
+			local tex = self:NewTexture(hatchFrame, "ARTWORK")
 			tex:SetTexture(MEDIA .. "Bake\\hatch", "REPEAT", "REPEAT", "TRILINEAR")
 			tex:AddMaskTexture(coast)
 			tex:Hide()
@@ -915,7 +1001,8 @@ function Proto:BuildSea(group, data, paint, artMap, artRect, hatchFrame)
 end
 
 function Proto:BuildPaint(continent)
-	local group = { continent = continent, placed = {}, artPlaced = {}, levels = {}, cities = {}, banners = {}, worldArt = {} }
+	local group = { canvas = self, continent = continent, placed = {}, artPlaced = {}, levels = {}, cities = {}, banners = {},
+		worldArt = {} }
 	self.groups[continent] = group
 	local data, paint = ns.MapArt, PaintData(continent)
 
@@ -1062,7 +1149,7 @@ function Proto:UpdatePaint(group, w, h, city)
 			local keep = visible or (near and n == warm)
 			if keep and not t.loaded then
 				if not t.tex then
-					t.tex = t.frame:CreateTexture(nil, "ARTWORK")
+					t.tex = self:NewTexture(t.frame, "ARTWORK")
 					t.tex:SetTexCoord(inset, 1 - inset, inset, 1 - inset)
 					local p = { t.tex, t.north, t.west, t.south, t.east }
 					group.placed[#group.placed + 1] = p

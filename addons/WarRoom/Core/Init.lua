@@ -123,6 +123,14 @@ WR.OnEvent("ADDON_LOADED", function(_, loaded)
 end)
 
 WR.OnEvent("PLAYER_LOGIN", function()
+	-- (the minimap module hides the game minimap's ground and notes it here: given back first, so it never stays hidden
+	-- when that module is turned off or missing; the module hides it again as it starts)
+	if WR.db.global.minimapGroundHidden then
+		WR.db.global.minimapGroundHidden = nil
+		if C_Minimap and C_Minimap.SetDrawGroundTextures then
+			pcall(C_Minimap.SetDrawGroundTextures, true)
+		end
+	end
 	WR.ready = true
 	for i = 1, #moduleOrder do
 		EnableModule(moduleOrder[i])

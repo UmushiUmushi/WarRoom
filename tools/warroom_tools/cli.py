@@ -2,7 +2,7 @@
 
 import argparse
 
-from . import client, link, mapart, tiles, wago, worldart, zones
+from . import buttons, client, link, mapart, tiles, wago, worldart, zones
 
 
 def cmd_client_info(args):
@@ -55,6 +55,11 @@ def cmd_mapart(args):
     print(f"tiles -> {mapart.BAKE_DIR}")
 
 
+def cmd_buttons(args):
+    for path in buttons.build():
+        print(f"-> {path}")
+
+
 def cmd_link(args):
     addons_dir = client.addons_dir(client.find_install(args.wow))
     for name, state in link.link_addons(addons_dir, unlink=args.unlink, dry_run=args.dry_run):
@@ -93,6 +98,8 @@ def main(argv=None):
     ma.add_argument("--build", help="client build (default: the installed Forever build)")
     ma.add_argument("--refresh", action="store_true", help="download the tables again")
     ma.set_defaults(fn=cmd_mapart)
+
+    sub.add_parser("buttons", help="draw WarRoom's own minimap button art (the reset button)").set_defaults(fn=cmd_buttons)
 
     ln = sub.add_parser("link", help="link the repo's addons into the game's AddOns folder")
     ln.add_argument("--unlink", action="store_true", help="remove the links instead")

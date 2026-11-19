@@ -8,6 +8,7 @@ Map, minimap, routes and dungeon addon for World of Warcraft: Forever. GPL-3.0-o
 |---|---|
 | `addons/WarRoom/` | Core addon: coordinates, position, pins, jobs, combat queue, saved data, data loading |
 | `addons/WarRoom_Map/` | World map: WarRoom's map inside the game's world map window (module 2) |
+| `addons/WarRoom_Minimap/` | Minimap: WarRoom's map under the game's minimap, its ground hidden so its icons sit on ours; pan and zoom past the game's, other addons' minimap buttons gathered into one hub (module 3). Settings: Esc > Options > AddOns > WarRoom (`/wr options`) |
 | `addons/WarRoom_Probe/` | Development checks (`/wrprobe`). Not for release |
 | `tools/warroom_tools/` | Python tools that build data files from the game client |
 | `tests/` | Unit tests for the pure-Lua parts (run in LuaJIT through `lupa`) and the tools |
